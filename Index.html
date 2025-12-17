@@ -1,0 +1,439 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no" />
+  <title>Festive Hunt</title>
+  <style>
+    html, body { margin:0; height:100%; background:#0b1020; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+    canvas { display:block; width:100%; height:100%; touch-action:none; }
+    .hud {
+      position:fixed; inset:0; pointer-events:none;
+      display:flex; flex-direction:column; justify-content:space-between;
+      padding: max(14px, env(safe-area-inset-top)) 14px max(14px, env(safe-area-inset-bottom));
+      color:#e9f0ff;
+      text-shadow: 0 2px 12px rgba(0,0,0,.6);
+    }
+    .top { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }
+    .badge { pointer-events:none; background:rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.12);
+      padding:10px 12px; border-radius:14px; backdrop-filter: blur(8px); }
+    .title { font-weight:700; letter-spacing:.2px; }
+    .sub { opacity:.85; font-size:13px; margin-top:4px; line-height:1.2; }
+    .meter { font-variant-numeric: tabular-nums; }
+    .toast {
+      pointer-events:none;
+      align-self:center;
+      max-width:min(520px, 92vw);
+      background:rgba(0,0,0,.35);
+      border:1px solid rgba(255,255,255,.14);
+      padding:12px 14px;
+      border-radius:16px;
+      backdrop-filter: blur(10px);
+      transform: translateY(8px);
+      opacity:0;
+      transition: opacity .25s ease, transform .25s ease;
+      margin-bottom: 6px;
+    }
+    .toast.show { opacity:1; transform: translateY(0); }
+    .toast b { display:block; margin-bottom:4px; }
+    .overlay {
+      position:fixed; inset:0; display:none; place-items:center;
+      background: radial-gradient(circle at 50% 35%, rgba(255,255,255,.12), rgba(0,0,0,.65));
+      padding: 18px;
+    }
+    .card {
+      width:min(560px, 94vw);
+      background: rgba(255,255,255,.10);
+      border:1px solid rgba(255,255,255,.18);
+      border-radius: 18px;
+      padding: 18px 16px;
+      color:#f3f6ff;
+      text-align:center;
+      backdrop-filter: blur(12px);
+      box-shadow: 0 10px 40px rgba(0,0,0,.45);
+    }
+    .reveal {
+      font-weight:900;
+      font-size: clamp(22px, 6vw, 34px);
+      letter-spacing: .2px;
+      margin: 8px 0 10px;
+    }
+    .btnrow { display:flex; gap:10px; justify-content:center; margin-top:12px; flex-wrap:wrap; }
+    button {
+      pointer-events:auto;
+      border: 1px solid rgba(255,255,255,.18);
+      background: rgba(0,0,0,.22);
+      color:#fff;
+      padding: 10px 14px;
+      border-radius: 14px;
+      font-weight: 650;
+      font-size: 14px;
+    }
+    button:active { transform: scale(.98); }
+    .tiny { opacity:.85; font-size: 13px; line-height:1.25; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div class="hud">
+  <div class="top">
+    <div class="badge">
+      <div class="title">Festive Hunt</div>
+      <div class="sub">Find 4 sparkles. Tap anywhere.</div>
+    </div>
+    <div class="badge meter" id="meter">00:59 • 0/4</div>
+  </div>
+
+  <div class="toast" id="toast">
+    <b id="toastTitle">Hint</b>
+    <div id="toastBody">…</div>
+  </div>
+</div>
+
+<div class="overlay" id="overlay">
+  <div class="card">
+    <div class="tiny">You found them all 🎄</div>
+    <div class="reveal" id="finalText">Christmas pint at the brig?</div>
+    <div class="tiny">Screenshot this and send it to your mate.</div>
+    <div class="btnrow">
+      <button id="restart">Play again</button>
+      <button id="copy">Copy text</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const meter = document.getElementById('meter');
+  const toast = document.getElementById('toast');
+  const toastTitle = document.getElementById('toastTitle');
+  const toastBody = document.getElementById('toastBody');
+  const overlay = document.getElementById('overlay');
+  const restartBtn = document.getElementById('restart');
+  const copyBtn = document.getElementById('copy');
+
+  // --- HiDPI sizing ---
+  function resize() {
+    const dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+    canvas.width = Math.floor(innerWidth * dpr);
+    canvas.height = Math.floor(innerHeight * dpr);
+    canvas.style.width = innerWidth + 'px';
+    canvas.style.height = innerHeight + 'px';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  addEventListener('resize', resize, { passive:true });
+  resize();
+
+  // --- Game config ---
+  const TOTAL_SECONDS = 60;
+  const FINAL_MESSAGE = "Christmas pint at the brig?";
+
+  // Four hops (hints), but we keep them subtle.
+  const HINTS = [
+    { title: "Hop 1", body: "Warm lights, low left." },
+    { title: "Hop 2", body: "Near the wreath—look closer." },
+    { title: "Hop 3", body: "Above the table line." },
+    { title: "Hop 4", body: "By the window frost." }
+  ];
+
+  // --- World / scene ---
+  const snow = [];
+  function resetSnow() {
+    snow.length = 0;
+    for (let i=0; i<140; i++) {
+      snow.push({
+        x: Math.random()*innerWidth,
+        y: Math.random()*innerHeight,
+        r: 0.8 + Math.random()*2.2,
+        v: 18 + Math.random()*60,
+        w: (Math.random()-0.5)*18
+      });
+    }
+  }
+  resetSnow();
+
+  // Place 4 "sparkles" (targets) relative to screen.
+  // They’re intentionally not obvious: small, low-contrast glints that pulse gently.
+  let targets = [];
+  function placeTargets() {
+    const W = innerWidth, H = innerHeight;
+    targets = [
+      { x: W*0.18, y: H*0.78, found:false }, // low left
+      { x: W*0.78, y: H*0.43, found:false }, // wreath area
+      { x: W*0.52, y: H*0.63, found:false }, // above table line
+      { x: W*0.84, y: H*0.22, found:false }, // window frost
+    ];
+  }
+  placeTargets();
+  addEventListener('resize', placeTargets, { passive:true });
+
+  // --- State ---
+  let foundCount = 0;
+  let start = performance.now();
+  let over = false;
+  let lastToastAt = 0;
+
+  function formatTime(s) {
+    const m = Math.floor(s/60);
+    const r = s % 60;
+    return String(m).padStart(2,'0') + ":" + String(r).padStart(2,'0');
+  }
+
+  function showToast(title, body) {
+    toastTitle.textContent = title;
+    toastBody.textContent = body;
+    toast.classList.add('show');
+    lastToastAt = performance.now();
+  }
+  function hideToastSoon() {
+    // auto-hide after ~2.2s
+    setTimeout(() => toast.classList.remove('show'), 2200);
+  }
+
+  function endGame() {
+    over = true;
+    overlay.style.display = "grid";
+  }
+
+  // --- Drawing helpers ---
+  function roundRect(x,y,w,h,r) {
+    const rr = Math.min(r, w/2, h/2);
+    ctx.beginPath();
+    ctx.moveTo(x+rr, y);
+    ctx.arcTo(x+w, y, x+w, y+h, rr);
+    ctx.arcTo(x+w, y+h, x, y+h, rr);
+    ctx.arcTo(x, y+h, x, y, rr);
+    ctx.arcTo(x, y, x+w, y, rr);
+    ctx.closePath();
+  }
+
+  function drawScene(t) {
+    const W = innerWidth, H = innerHeight;
+
+    // Background gradient
+    const g = ctx.createLinearGradient(0,0,0,H);
+    g.addColorStop(0, "#0b1430");
+    g.addColorStop(0.6, "#0a1022");
+    g.addColorStop(1, "#060814");
+    ctx.fillStyle = g;
+    ctx.fillRect(0,0,W,H);
+
+    // "Window" glow area (top right)
+    ctx.save();
+    ctx.globalAlpha = 0.9;
+    const wg = ctx.createRadialGradient(W*0.84, H*0.20, 10, W*0.84, H*0.20, Math.max(W,H)*0.55);
+    wg.addColorStop(0, "rgba(160,200,255,0.22)");
+    wg.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = wg;
+    ctx.fillRect(0,0,W,H);
+    ctx.restore();
+
+    // Table / floor
+    ctx.save();
+    ctx.globalAlpha = 0.9;
+    ctx.fillStyle = "rgba(255,255,255,0.05)";
+    ctx.fillRect(0, H*0.70, W, H*0.30);
+    ctx.restore();
+
+    // Simple tree silhouette (left)
+    ctx.save();
+    ctx.globalAlpha = 0.9;
+    ctx.fillStyle = "rgba(0,0,0,0.30)";
+    ctx.beginPath();
+    ctx.moveTo(W*0.10, H*0.70);
+    ctx.lineTo(W*0.22, H*0.28);
+    ctx.lineTo(W*0.34, H*0.70);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+
+    // Lights (small bulbs) along tree
+    ctx.save();
+    for (let i=0; i<14; i++){
+      const px = W*(0.14 + i*0.013);
+      const py = H*(0.66 - i*0.03);
+      const pulse = 0.45 + 0.35*Math.sin(t*0.004 + i);
+      ctx.globalAlpha = 0.18 + pulse*0.18;
+      ctx.fillStyle = "rgba(255,220,120,1)";
+      ctx.beginPath();
+      ctx.arc(px, py, 3.2, 0, Math.PI*2);
+      ctx.fill();
+    }
+    ctx.restore();
+
+    // Wreath circle (right middle)
+    ctx.save();
+    ctx.globalAlpha = 0.28;
+    ctx.strokeStyle = "rgba(120,255,160,1)";
+    ctx.lineWidth = 5;
+    ctx.beginPath();
+    ctx.arc(W*0.78, H*0.43, Math.min(W,H)*0.075, 0, Math.PI*2);
+    ctx.stroke();
+    ctx.restore();
+
+    // Falling snow
+    ctx.save();
+    ctx.fillStyle = "rgba(255,255,255,0.72)";
+    for (const flake of snow) {
+      flake.y += flake.v * (1/60);
+      flake.x += flake.w * (1/60);
+      if (flake.y > H+10) { flake.y = -10; flake.x = Math.random()*W; }
+      if (flake.x < -20) flake.x = W+20;
+      if (flake.x > W+20) flake.x = -20;
+      ctx.globalAlpha = 0.35 + (flake.r/3.0)*0.55;
+      ctx.beginPath();
+      ctx.arc(flake.x, flake.y, flake.r, 0, Math.PI*2);
+      ctx.fill();
+    }
+    ctx.restore();
+
+    // Targets (sparkles): subtle cross-glint
+    for (let i=0; i<targets.length; i++) {
+      const tg = targets[i];
+      if (tg.found) continue;
+
+      const pulse = 0.5 + 0.5*Math.sin(t*0.005 + i*2.1);
+      const alpha = 0.08 + pulse*0.10; // subtle
+      const size = 10 + pulse*5;
+
+      ctx.save();
+      ctx.translate(tg.x, tg.y);
+      ctx.globalAlpha = alpha;
+      ctx.strokeStyle = "rgba(255,255,255,1)";
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.moveTo(-size, 0); ctx.lineTo(size, 0);
+      ctx.moveTo(0, -size); ctx.lineTo(0, size);
+      ctx.stroke();
+
+      ctx.globalAlpha = alpha*0.9;
+      ctx.beginPath();
+      ctx.arc(0,0, 1.8+ pulse*1.2, 0, Math.PI*2);
+      ctx.fillStyle = "rgba(255,255,255,1)";
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // Soft vignette
+    ctx.save();
+    const vg = ctx.createRadialGradient(W/2,H/2,Math.min(W,H)*0.1, W/2,H/2, Math.max(W,H)*0.7);
+    vg.addColorStop(0, "rgba(0,0,0,0)");
+    vg.addColorStop(1, "rgba(0,0,0,0.55)");
+    ctx.fillStyle = vg;
+    ctx.fillRect(0,0,W,H);
+    ctx.restore();
+
+    // Instruction bubble on first seconds
+    if (!over && foundCount === 0) {
+      ctx.save();
+      ctx.globalAlpha = 0.9;
+      const bx = W*0.08, by = H*0.12, bw = W*0.84, bh = 56;
+      ctx.fillStyle = "rgba(255,255,255,0.06)";
+      ctx.strokeStyle = "rgba(255,255,255,0.10)";
+      ctx.lineWidth = 1;
+      roundRect(bx, by, bw, bh, 16);
+      ctx.fill(); ctx.stroke();
+      ctx.fillStyle = "rgba(240,246,255,0.95)";
+      ctx.font = "600 15px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+      ctx.fillText("Find 4 hidden sparkles ✨", bx+14, by+23);
+      ctx.font = "500 13px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+      ctx.fillStyle = "rgba(240,246,255,0.82)";
+      ctx.fillText("They’re subtle — glance around the scene and tap what glints.", bx+14, by+43);
+      ctx.restore();
+    }
+  }
+
+  function tick(now) {
+    const elapsed = (now - start) / 1000;
+    const remaining = Math.max(0, Math.ceil(TOTAL_SECONDS - elapsed));
+    meter.textContent = `${formatTime(remaining)} • ${foundCount}/4`;
+
+    // auto-hide toast if it's been visible for a while
+    if (toast.classList.contains('show') && now - lastToastAt > 2400) {
+      toast.classList.remove('show');
+    }
+
+    if (!over && remaining <= 0) {
+      // If time runs out, reveal anyway (keeps it a 1-minute experience).
+      endGame();
+    }
+
+    drawScene(now);
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+
+  // --- Interaction ---
+  function getPoint(evt) {
+    const t = evt.touches ? evt.touches[0] : evt;
+    return { x: t.clientX, y: t.clientY };
+  }
+
+  function tryHit(x,y) {
+    if (over) return;
+
+    // Hit radius small-ish to keep it “hunt-y”
+    for (let i=0; i<targets.length; i++) {
+      const tg = targets[i];
+      if (tg.found) continue;
+      const dx = x - tg.x, dy = y - tg.y;
+      const dist = Math.hypot(dx,dy);
+      if (dist < 26) {
+        tg.found = true;
+        foundCount++;
+
+        const hint = HINTS[foundCount-1];
+        showToast(hint.title, hint.body);
+        hideToastSoon();
+
+        // Little “ping”
+        try { navigator.vibrate && navigator.vibrate(18); } catch(e){}
+
+        if (foundCount >= 4) endGame();
+        return;
+      }
+    }
+
+    // Miss tap: occasionally nudge (but not every time)
+    if (Math.random() < 0.22 && foundCount < 4) {
+      const hint = HINTS[foundCount] || { title:"Keep looking", body:"Something is glinting…" };
+      showToast("Miss", hint.body);
+      hideToastSoon();
+    }
+  }
+
+  canvas.addEventListener('pointerdown', (e) => {
+    const p = getPoint(e);
+    tryHit(p.x, p.y);
+  }, { passive:true });
+
+  // Buttons
+  restartBtn.addEventListener('click', () => {
+    overlay.style.display = "none";
+    over = false;
+    foundCount = 0;
+    start = performance.now();
+    for (const tg of targets) tg.found = false;
+    showToast("New round", "Find the 4 sparkles again.");
+    hideToastSoon();
+  });
+
+  copyBtn.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(FINAL_MESSAGE);
+      showToast("Copied", "Message copied to clipboard.");
+    } catch {
+      showToast("Copy failed", "Select and copy manually: " + FINAL_MESSAGE);
+    }
+    hideToastSoon();
+  });
+
+  // Set final message (in case you want to change it quickly)
+  document.getElementById('finalText').textContent = FINAL_MESSAGE;
+})();
+</script>
+</body>
+</html>
